@@ -1,4 +1,4 @@
-import { scrapeBestBuyProduct } from "./scrapers/bestbuy.js";
+import { scrapeDarazProduct } from "./scrapers/daraz.js";
 // import { scrapeAliExpressProduct } from "./scrapers/aliexpress.js";
 // import Fastify from "fastify";
 
@@ -6,8 +6,8 @@ const DEBUG = false;
 
 const main = async () => {
   const url =
-    "https://www.bestbuy.com/product/hp-15-6-full-hd-touch-screen-laptop-intel-core-i7-16gb-memory-512gb-ssd-natural-silver/JJGRPJV92P#tabbed-customerreviews";
-  await scrapeBestBuyProduct(url, { headless: DEBUG });
+    "https://www.daraz.pk/products/tws-10-i477228354-s2238430730.html?pvid=af79c6fe-0276-4c56-9f6e-8e76ecb13f1e&search=jfy&scm=1007.51705.413671.0&spm=a2a0e.tm80335142.just4u.d_477228354";
+  await scrapeDarazProduct(url, { headless: DEBUG });
 };
 
 main();
