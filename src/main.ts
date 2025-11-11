@@ -1,13 +1,19 @@
-import { scrapeDarazProduct } from "./scrapers/daraz.js";
+// import { scrapeDarazProduct } from "./components/scrapers/daraz.js";
 // import { scrapeAliExpressProduct } from "./scrapers/aliexpress.js";
 // import Fastify from "fastify";
+import { runPythonPredict } from "./utils/pythonBridge.js";
 
-const DEBUG = false;
+// const DEBUG = false;
 
 const main = async () => {
-  const url =
-    "https://www.daraz.pk/products/tws-10-i477228354-s2238430730.html?pvid=af79c6fe-0276-4c56-9f6e-8e76ecb13f1e&search=jfy&scm=1007.51705.413671.0&spm=a2a0e.tm80335142.just4u.d_477228354";
-  await scrapeDarazProduct(url, { headless: DEBUG });
+  // const url =
+  //   "https://www.daraz.pk/products/tws-10-i477228354-s2238430730.html?pvid=af79c6fe-0276-4c56-9f6e-8e76ecb13f1e&search=jfy&scm=1007.51705.413671.0&spm=a2a0e.tm80335142.just4u.d_477228354";
+  // await scrapeDarazProduct(url, { headless: DEBUG });
+  const reviews = ["The product was amazing and worked perfectly!", "Totally fake, do not buy this."];
+
+  const results = await runPythonPredict(reviews);
+  console.log(results);
+  return results;
 };
 
 main();

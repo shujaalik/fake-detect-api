@@ -1,5 +1,5 @@
 import puppeteer, { Browser, Page } from "puppeteer";
-import waitFor from "../utils/wait.js";
+import waitFor from "../../utils/wait.js";
 
 /**
  * Interface for a single review

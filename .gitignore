@@ -115,3 +115,14 @@ dist
 .idea/
 .vscode/
 tools/dev
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
