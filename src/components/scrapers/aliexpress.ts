@@ -17,6 +17,7 @@ interface ProductData {
   rating?: number;
   totalReviews?: number;
   image?: string;
+  ratingBreakdown?: Record<number, number>;
 }
 
 /**
@@ -29,6 +30,7 @@ interface ScrapingResult {
   image: string;
   fiveStarReviews: Review[];
   fiveStarReviewCount: number;
+  ratingBreakdown?: Record<number, number>;
 }
 
 /**
@@ -39,6 +41,41 @@ interface ScraperConfig {
   headless?: boolean;
   timeout?: number;
   userAgent?: string;
+}
+
+type RatingBreakdown = {
+  5: number;
+  4: number;
+  3: number;
+  2: number;
+  1: number;
+};
+
+function estimateRatingBreakdown(averageRating: number, totalRatings: number): RatingBreakdown {
+  let ratios: number[];
+
+  if (averageRating >= 4.9) ratios = [0.93, 0.05, 0.01, 0.005, 0.005];
+  else if (averageRating >= 4.7) ratios = [0.88, 0.08, 0.02, 0.01, 0.01];
+  else if (averageRating >= 4.5) ratios = [0.8, 0.1, 0.05, 0.03, 0.02];
+  else if (averageRating >= 4.3) ratios = [0.7, 0.15, 0.07, 0.05, 0.03];
+  else ratios = [0.6, 0.2, 0.1, 0.06, 0.04];
+
+  const [r5, r4, r3, r2, r1] = ratios;
+
+  // Calculate approximate counts
+  const breakdown = {
+    5: Math.round(totalRatings * r5),
+    4: Math.round(totalRatings * r4),
+    3: Math.round(totalRatings * r3),
+    2: Math.round(totalRatings * r2),
+    1: Math.round(totalRatings * r1),
+  };
+
+  // Fix rounding errors so total adds up
+  const diff = totalRatings - (breakdown[5] + breakdown[4] + breakdown[3] + breakdown[2] + breakdown[1]);
+  breakdown[5] += diff;
+
+  return breakdown;
 }
 
 /**
@@ -101,6 +138,10 @@ export async function scrapeAliExpressProduct(productUrl: string, config: Scrape
       }
     });
 
+    // Track whether we've successfully selected the 5-star filter (declared at page-level scope so
+    // fallback handlers can read/update it).
+    let fiveStarSelected = false;
+
     console.log("Navigating to product page...");
     await page.goto(productUrl, {
       waitUntil: "domcontentloaded",
@@ -112,7 +153,7 @@ export async function scrapeAliExpressProduct(productUrl: string, config: Scrape
 
     console.log("Extracting product information...");
 
-    // Extract product information (title + image). Keep this simple and avoid nested page.evaluate calls.
+    // Extract product information (title + image + rating + totalReviews). Keep this simple and avoid nested page.evaluate calls.
     const productData: ProductData = await page.evaluate(() => {
       const data: ProductData = {};
 
@@ -157,6 +198,60 @@ export async function scrapeAliExpressProduct(productUrl: string, config: Scrape
         }
       }
 
+      // Extract rating and total reviews from the reviewer box if present
+      const reviewerSelectors = [".reviewer--box--wVguYsD", '[class*="reviewer--box"]', '[class*="reviewer"]'];
+
+      let reviewerEl: Element | null = null;
+      for (const sel of reviewerSelectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          reviewerEl = el;
+          break;
+        }
+      }
+      if (reviewerEl) {
+        // rating is inside a <strong> element (example: "\u00A0\u00A03.6\u00A0\u00A0")
+        const strong = reviewerEl.querySelector("strong");
+        if (strong && strong.textContent) {
+          const txt = strong.textContent.replace(/\u00A0/g, " ").trim();
+          const m = txt.match(/([0-9]+(?:\.[0-9]+)?)/);
+          if (m) {
+            const val = parseFloat(m[1]);
+            if (!Number.isNaN(val)) data.rating = val;
+          }
+        }
+
+        // total reviews typically in an <a> near the rating (example: "459 Reviews")
+        // total reviews: prefer an anchor whose text contains "review(s)" —
+        // avoid matching the integer part of a decimal rating (e.g. "3.6") by ensuring not followed by a dot
+        let revAnchor: Element | null = null;
+        const anchorCandidates = Array.from(reviewerEl.querySelectorAll("a")) as Element[];
+        for (const a of anchorCandidates) {
+          const t = (a.textContent || "").trim();
+          if (/\breview(s)?\b/i.test(t)) {
+            revAnchor = a;
+            break;
+          }
+        }
+
+        // fallback: anchor with reviews-like class
+        if (!revAnchor) {
+          revAnchor = reviewerEl.querySelector('a[class*="reviews"]');
+        }
+
+        if (revAnchor && revAnchor.textContent) {
+          const txt = revAnchor.textContent.replace(/,/g, "").trim();
+          // match a whole integer (optionally with comma separators and trailing +),
+          // but avoid matching the integer part of a decimal rating (e.g. "3.6") by ensuring not followed by a dot
+          const m2 = txt.match(/(\d[\d,]*\+?)(?!\.)/);
+          if (m2) {
+            const digitsOnly = m2[1].replace(/[^\d]/g, "");
+            const cnt = parseInt(digitsOnly, 10);
+            if (!Number.isNaN(cnt)) data.totalReviews = cnt;
+          }
+        }
+      }
+
       return data;
     });
 
@@ -165,6 +260,21 @@ export async function scrapeAliExpressProduct(productUrl: string, config: Scrape
     console.log("- Rating:", productData.rating || "Not found");
     console.log("- Total Reviews:", productData.totalReviews || "Not found");
     console.log("- Image URL:", productData.image);
+
+    // If we have an average rating and total reviews but no explicit breakdown,
+    // estimate the rating breakdown using the helper function added above.
+    try {
+      if (
+        typeof productData.rating === "number" &&
+        typeof productData.totalReviews === "number" &&
+        !productData.ratingBreakdown
+      ) {
+        productData.ratingBreakdown = estimateRatingBreakdown(productData.rating, productData.totalReviews);
+        console.log("Estimated rating breakdown:", productData.ratingBreakdown);
+      }
+    } catch (e) {
+      // ignore estimation errors — not critical
+    }
 
     // Scroll down to load reviews section
     console.log("\nScrolling to reviews section...");
@@ -196,85 +306,177 @@ export async function scrapeAliExpressProduct(productUrl: string, config: Scrape
         await waitFor(1500);
       }
 
-      // 2) Open the ratings dropdown and select the "5 Star" item using element handles.
-      // The dropdown on this site shows on hover, so use elementHandle.hover() where possible
-      // and confirm the filter applied by checking for a change in the review count.
-      let fiveStarSelected = false;
+      // Only click page-level anchors to open the reviews modal if the modal is not already open.
+      // Clicking the anchor when the modal is open can close it on some pages, which breaks scraping.
       try {
-        // find candidate buttons that could be the ratings control
-        const candidates = await page.$$('button, a, div[role="button"], .filter--filterItem--AEUeCbl');
-        let ratingsHandle: any = null;
-        for (const h of candidates) {
-          const txt = (await page.evaluate(el => (el.textContent || "").toLowerCase(), h)) as string;
-          if (txt.includes("all ratings") || txt.includes("ratings")) {
-            ratingsHandle = h;
-            break;
-          }
-        }
-
-        if (ratingsHandle) {
+        const modalHandle = await page.$(".comet-v2-modal-body");
+        if (modalHandle) {
+          console.log("Reviews modal already open, skipping page-level anchor clicks");
+        } else {
+          // Prefer clicking via element handle (more robust) before falling back to evaluate.
+          let opened = false;
           try {
-            await ratingsHandle.hover();
-            console.log("Hovered 'All ratings' button");
-          } catch (e) {
-            // hover might fail in some headless contexts, fall back to a click
+            const reviewHandle = await page.$(
+              'a[href="#nav-review"], .reviewer--rating--xrWWFzx, .reviewer--reviews--cx7Zs_V',
+            );
+            if (reviewHandle) {
+              try {
+                await reviewHandle.click();
+                console.log("Clicked reviews anchor (handle) to open modal/scroll");
+                await waitFor(1000);
+                opened = true;
+              } catch {
+                try {
+                  await page.evaluate(el => (el as HTMLElement).click(), reviewHandle);
+                  opened = true;
+                } catch {}
+              }
+            }
+          } catch {}
+
+          if (!opened) {
             try {
-              await ratingsHandle.click();
-              console.log("Clicked 'All ratings' button as fallback");
+              const clicked = await page.evaluate(() => {
+                const a = document.querySelector('a[href="#nav-review"]') as HTMLElement | null;
+                if (a) {
+                  a.click();
+                  return true;
+                }
+                const el = document.querySelector(
+                  ".reviewer--rating--xrWWFzx, .reviewer--reviews--cx7Zs_V",
+                ) as HTMLElement | null;
+                if (el) {
+                  el.click();
+                  return true;
+                }
+                return false;
+              });
+              if (clicked) {
+                console.log("Clicked reviews anchor to open modal/scroll (evaluate)");
+                await waitFor(1000);
+              }
             } catch {}
           }
+        }
+      } catch {}
 
-          // Wait for the dropdown menu to appear
-          try {
-            await page.waitForSelector(".comet-v2-dropdown-body, .comet-v2-menu-item", { timeout: 3000 });
-          } catch {
-            // small fallback wait
-            await waitFor(800);
-          }
-
-          // locate menu items and pick the one matching 5 stars
-          const menuItems = await page.$$(".comet-v2-menu-item, .comet-v2-menu-item-content, li");
-          let targetItem: any = null;
-          for (const mi of menuItems) {
-            const mtxt = (await page.evaluate(el => (el.textContent || "").trim().toLowerCase(), mi)) as string;
-            if (mtxt === "5 star" || mtxt.startsWith("5 ") || mtxt.includes("5-star")) {
-              targetItem = mi;
-              break;
-            }
-          }
-
-          // If we found a candidate, click it and wait for the list to change
-          if (targetItem) {
-            const preCount = await page.$$eval(".list--itemBox--je_KNzb", els => els.length);
-            try {
-              await targetItem.click();
-              console.log("Clicked '5 Star' menu item");
-            } catch (e) {
-              // try clicking via evaluate as a last resort
-              try {
-                await page.evaluate(el => (el as HTMLElement).click(), targetItem);
-              } catch {}
-            }
-
-            // wait for change in number of review boxes (indicates filter applied), or time out
-            try {
-              await page.waitForFunction(
-                (sel, before) => document.querySelectorAll(sel).length !== before,
-                { timeout: 5000 },
-                ".list--itemBox--je_KNzb",
-                preCount,
-              );
-              fiveStarSelected = true;
-              console.log("Detected change in review list after selecting '5 Star'");
-            } catch {
-              // no change detected — keep fiveStarSelected false and fall back later
-              console.log("No immediate change in review list after selecting '5 Star'");
-            }
-          } else {
-            console.log("Could not find explicit '5 Star' menu item (will attempt other fallbacks)");
-          }
+      // 2) Open the ratings dropdown and select the "5 Star" item INSIDE THE MODAL.
+      // Important: Scope to the modal container and use hover for the "All ratings" control.
+      try {
+        const modalSelector = ".comet-v2-modal-content.comet-v2-modal-no-footer, .comet-v2-modal-body";
+        const modalScope = await page.$(modalSelector);
+        if (!modalScope) {
+          console.log("Modal not open yet; deferring 5-star selection to modal phase");
         } else {
-          console.log("Couldn't find an 'All ratings' control to hover/click");
+          // A) Hover the in-modal "All ratings" control to open the dropdown
+          try {
+            const triggers = await modalScope.$$(
+              'button, [role="button"], .filter--filterItem--AEUeCbl, .filter--filterItem',
+            );
+            let hoveredAllRatings = false;
+            for (const t of triggers) {
+              const txt = (await page.evaluate(el => (el.textContent || "").trim().toLowerCase(), t)) as string;
+              if (txt.includes("all ratings") || txt === "all" || txt.includes("ratings")) {
+                try {
+                  await t.hover();
+                  hoveredAllRatings = true;
+                  console.log("Hovered 'All ratings' inside modal");
+                  break;
+                } catch {
+                  try {
+                    await page.evaluate(el => {
+                      const evt = new MouseEvent("mouseover", { bubbles: true, cancelable: true });
+                      (el as HTMLElement).dispatchEvent(evt);
+                    }, t);
+                    hoveredAllRatings = true;
+                    console.log("Dispatched mouseover on 'All ratings' inside modal");
+                    break;
+                  } catch {}
+                }
+              }
+            }
+
+            if (hoveredAllRatings) {
+              // Wait briefly for the dropdown menu to render
+              try {
+                await page.waitForSelector(
+                  ".comet-v2-menu-item, .comet-v2-dropdown-body, .comet-v2-menu-item-content, li",
+                  { timeout: 2000 },
+                );
+              } catch {}
+
+              // Prefer visible menu items
+              const menuItems = await page.$$(".comet-v2-menu-item, .comet-v2-menu-item-content, li, button, a");
+              for (const mi of menuItems) {
+                const [isVisible, mtxt] = (await Promise.all([
+                  page.evaluate(el => {
+                    const rect = (el as HTMLElement).getBoundingClientRect();
+                    const style = window.getComputedStyle(el as HTMLElement);
+                    return (
+                      rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none"
+                    );
+                  }, mi),
+                  page.evaluate(el => (el.textContent || "").trim().toLowerCase(), mi),
+                ])) as [boolean, string];
+
+                if (!isVisible) continue;
+                if (
+                  mtxt === "5 star" ||
+                  mtxt.startsWith("5 star") ||
+                  mtxt.includes("5-star") ||
+                  mtxt.includes("5 star")
+                ) {
+                  try {
+                    await mi.click();
+                    fiveStarSelected = true;
+                    console.log("Selected '5 Star' from modal dropdown");
+                    await waitFor(800);
+                    break;
+                  } catch {}
+                }
+              }
+            }
+          } catch {}
+
+          // B) If not selected via dropdown, try a direct 5-star button within the modal
+          if (!fiveStarSelected) {
+            const directClickedInModal = await page.evaluate((sel: string) => {
+              const modal = document.querySelector(sel);
+              const root: Document | Element = modal || document;
+              const candidates = Array.from(
+                root.querySelectorAll(
+                  'button, a, div[role="button"], .filter--filterItem--AEUeCbl, .filter--filterItem',
+                ),
+              ) as HTMLElement[];
+              for (const el of candidates) {
+                const txt = (el.textContent || "").trim().toLowerCase();
+                if (txt === "5 star" || txt.startsWith("5 star") || txt.includes("5-star") || txt.includes("5 star")) {
+                  try {
+                    (el as HTMLElement).click();
+                    return true;
+                  } catch {}
+                }
+                const btn = el.querySelector && (el.querySelector("button") as HTMLElement | null);
+                if (btn) {
+                  const btxt = (btn.textContent || "").trim().toLowerCase();
+                  if (btxt === "5 star" || btxt.startsWith("5 star") || btxt.includes("5-star")) {
+                    try {
+                      btn.click();
+                      return true;
+                    } catch {}
+                  }
+                }
+              }
+              return false;
+            }, modalSelector);
+
+            if (directClickedInModal) {
+              fiveStarSelected = true;
+              console.log("Clicked 5 Star directly inside modal");
+            } else {
+              console.log("No explicit 5 Star control found inside modal — will rely on later fallbacks");
+            }
+          }
         }
       } catch (e) {
         console.log("Error while trying to open/select ratings dropdown:", (e as Error).message);
@@ -289,6 +491,48 @@ export async function scrapeAliExpressProduct(productUrl: string, config: Scrape
         await page.waitForSelector(".comet-v2-modal-body", { timeout: 8000 });
         await page.waitForSelector(".list--itemBox--je_KNzb", { timeout: 8000 });
         console.log("Reviews modal and list detected");
+        // If we haven't already selected the 5-star filter, try clicking the filter items
+        // that appear inside the modal. Many pages use `.filter--filterItem--AEUeCbl` with a
+        // button whose text is "5 Star" — click that if present.
+        if (!fiveStarSelected) {
+          try {
+            const clicked = await page.evaluate(() => {
+              // check for filter item blocks first
+              const blocks = Array.from(
+                document.querySelectorAll(".filter--filterItem--AEUeCbl, .filter--filterItem"),
+              ) as HTMLElement[];
+              for (const b of blocks) {
+                const btn = b.querySelector("button") as HTMLElement | null;
+                const txt = (btn?.textContent || b.textContent || "").trim().toLowerCase();
+                if (txt.includes("5 star") || txt.startsWith("5 star") || txt.includes("5-star")) {
+                  if (btn) btn.click();
+                  else (b as HTMLElement).click();
+                  return true;
+                }
+              }
+
+              // fallback: any button with exact/near-exact text
+              const buttons = Array.from(document.querySelectorAll("button, a")) as HTMLElement[];
+              for (const btn of buttons) {
+                const t = (btn.textContent || "").trim().toLowerCase();
+                if (t === "5 star" || t.startsWith("5 star") || t.includes("5-star")) {
+                  btn.click();
+                  return true;
+                }
+              }
+
+              return false;
+            });
+
+            if (clicked) {
+              fiveStarSelected = true;
+              console.log("Clicked 5 Star filter inside modal");
+              await waitFor(800);
+            }
+          } catch (e) {
+            // ignore — we'll try other fallbacks below
+          }
+        }
       } catch (e) {
         console.log("Reviews modal or list not detected within timeout, continuing to scraping (may miss reviews)");
       }
@@ -300,17 +544,52 @@ export async function scrapeAliExpressProduct(productUrl: string, config: Scrape
     // Try to filter for 5-star reviews
     console.log("Attempting to filter for 5-star reviews...");
     try {
-      await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, label, div[role="button"]'));
-        const fiveStarButton = buttons.find(
-          btn =>
-            btn.textContent?.includes("5") &&
-            (btn.textContent?.toLowerCase().includes("star") || btn.innerHTML.includes("star")),
-        );
-        if (fiveStarButton) {
-          (fiveStarButton as HTMLElement).click();
+      // Try clicking modal filter blocks using element handles (more reliable than in-page evaluate).
+      try {
+        const modalSelector = ".comet-v2-modal-content.comet-v2-modal-no-footer, .comet-v2-modal-body";
+        const modalScope = await page.$(modalSelector);
+        const blocks = modalScope
+          ? await modalScope.$$(".filter--filterItem--AEUeCbl, .filter--filterItem")
+          : await page.$$(".filter--filterItem--AEUeCbl, .filter--filterItem");
+
+        for (const b of blocks) {
+          const txt = (await page.evaluate(el => (el.textContent || "").toLowerCase(), b)) as string;
+          if (txt.includes("5 star") || txt.includes("5-star")) {
+            try {
+              await b.click();
+              console.log("Clicked 5 Star filter (handle)");
+              await waitFor(800);
+              fiveStarSelected = true;
+              break;
+            } catch {}
+          }
+          const btn = await b.$("button");
+          if (btn) {
+            const btxt = (await page.evaluate(el => (el.textContent || "").toLowerCase(), btn)) as string;
+            if (btxt.includes("5 star") || btxt.includes("5-star")) {
+              try {
+                await btn.click();
+                console.log("Clicked inner button 5 Star (handle)");
+                await waitFor(800);
+                fiveStarSelected = true;
+                break;
+              } catch {}
+            }
+          }
         }
-      });
+      } catch (e) {
+        // ignore
+      }
+      const modalSelector2 = ".comet-v2-modal-content.comet-v2-modal-no-footer, .comet-v2-modal-body";
+      await page.evaluate((sel: string) => {
+        const root = (document.querySelector(sel) as HTMLElement) || document.body;
+        const buttons = Array.from(root.querySelectorAll('button, label, div[role="button"]')) as HTMLElement[];
+        const fiveStarButton = buttons.find(btn => {
+          const t = (btn.textContent || "").toLowerCase();
+          return (t.includes("5") && t.includes("star")) || btn.innerHTML.toLowerCase().includes("star");
+        });
+        if (fiveStarButton) fiveStarButton.click();
+      }, modalSelector2);
       await waitFor(2000);
     } catch (e) {
       console.log("Could not filter for 5-star reviews");
@@ -427,6 +706,8 @@ export async function scrapeAliExpressProduct(productUrl: string, config: Scrape
       image: productData.image || "N/A",
       fiveStarReviews: fiveStarReviews.slice(0, maxReviews),
       fiveStarReviewCount: fiveStarReviews.length,
+      // Ensure ratingBreakdown is surfaced to the caller
+      ratingBreakdown: productData.ratingBreakdown || undefined,
     };
 
     console.log("\n=== SCRAPING COMPLETE ===");
