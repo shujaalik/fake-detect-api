@@ -6,6 +6,10 @@ const fastify = Fastify({
   logger: true,
 });
 
+await fastify.register(import("@fastify/cors"), {
+  origin: true, // Allow all origins for dev, or specify http://localhost:5173
+});
+
 // routes
 fastify.register(baseRoutes, { prefix: "/" });
 fastify.register(scrapersRoutes, { prefix: "/scrapers" });

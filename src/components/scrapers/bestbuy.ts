@@ -1,5 +1,9 @@
-import puppeteer, { Browser, Page } from "puppeteer";
+import puppeteer from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import { Browser, Page } from "puppeteer";
 import waitFor from "../../utils/wait.js";
+
+puppeteer.use(StealthPlugin());
 
 /**
  * Local types for this scraper
@@ -35,17 +39,17 @@ export async function scrapeBestBuyProduct(productUrl: string, config: ScraperCo
     maxReviews = 100,
     headless = true,
     timeout = 60000,
-    userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   } = config;
 
   let browser: Browser | undefined;
 
   try {
-    browser = await puppeteer.launch({
+    browser = (await puppeteer.launch({
       headless: headless ? "shell" : false,
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
       executablePath: process.env.CHROME_BIN || undefined,
-    });
+    })) as unknown as Browser;
 
     const page: Page = await browser.newPage();
     await page.setUserAgent(userAgent);
@@ -62,81 +66,87 @@ export async function scrapeBestBuyProduct(productUrl: string, config: ScraperCo
     await page.goto(productUrl, { waitUntil: "domcontentloaded", timeout });
     await waitFor(2500);
 
-    // Click "See All Customer Reviews" (button or link)
-    console.log("Looking for 'See All Customer Reviews' button...");
-
-    // Wait until the button/link/span with the expected text appears (helps with dynamic rendering)
-    try {
-      await page.waitForFunction(
-        () => {
-          const sel = 'button[role="link"] span, button span, a';
-          const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
-          return els.some(e => {
-            const t = (e.textContent || "").trim().toLowerCase();
-            return t.includes("see all customer reviews") || t.includes("see all reviews");
-          });
-        },
-        { timeout: 10000 },
-      );
-      console.log("'See All Customer Reviews' control detected (or timed in). Proceeding to click logic...");
-    } catch (e) {
-      // timeout or other - we'll still try the click logic below
-      console.log("Timed out waiting for 'See All Customer Reviews' control; attempting best-effort click");
-    }
+    // 3. Locate and click "See All Customer Reviews" or determining if we need to expand an accordion
+    console.log("Looking for reviews trigger...");
 
     try {
+      // Try multiple selectors for the reviews trigger
       const clicked = await page.evaluate(() => {
-        const candidates = Array.from(document.querySelectorAll("a, button")) as HTMLElement[];
-        const btn = candidates.find(el => {
-          const txt = (el.textContent || "").trim().toLowerCase();
-          return (
-            txt === "see all customer reviews" ||
-            txt.includes("see all customer reviews") ||
-            txt === "see all reviews" ||
-            txt.includes("see all reviews")
-          );
+        // Strategy 1: The specific data-testid found in debugging
+        const statsLink = document.querySelector('a[data-testid="rnr-stats-link"]') as HTMLElement;
+        if (statsLink) {
+          statsLink.click();
+          // return "stats-link"; // Continue to try other clicks just in case
+        }
+
+        // Strategy 2: Find the "Customer Reviews" or "Reviews" accordion button
+        // Best Buy often uses a button with child h2 or h3
+        const buttons = Array.from(document.querySelectorAll("button"));
+        const reviewAccordion = buttons.find(b => {
+          const t = b.innerText || "";
+          return t.includes("Reviews") && (t.includes("Customer") || t.includes("("));
         });
-        if (btn) {
-          (btn as HTMLElement).click();
-          return true;
+        if (reviewAccordion) {
+          reviewAccordion.click();
+          return "accordion-button";
         }
-        // Some pages have a link with href to /site/reviews/... try to find it
-        const link = Array.from(document.querySelectorAll("a")).find(a =>
-          (a.getAttribute("href") || "").includes("/site/reviews/"),
-        ) as HTMLAnchorElement | undefined;
-        if (link) {
-          (link as HTMLAnchorElement).click();
-          return true;
+
+        // Strategy 3: Look for the specific class used by Q&A accordion and find its sibling?
+        // Q&A button class was: c-button-unstyled font-weight-medium w-full flex justify-content-between align-items-center
+        const accordions = Array.from(document.querySelectorAll("button.c-button-unstyled.w-full"));
+        const reviewAcc = accordions.find(b => b.textContent?.includes("Reviews"));
+        if (reviewAcc) {
+          reviewAcc.click();
+          return "generic-accordion";
         }
-        return false;
+
+        return statsLink ? "stats-link-only" : null;
       });
 
-      if (clicked) {
-        // wait for navigation to reviews path or for reviews container
-        try {
-          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 8000 });
-        } catch {}
-        // ensure we're on reviews page (URL contains /site/reviews/ or /reviews/)
-        if (!/\/site\/reviews\//.test(page.url())) {
-          // sometimes clicking doesn't navigate (opens in same document via JS) - wait for review list
-          try {
-            await page.waitForSelector("[data-reviews-container], .reviews", { timeout: 6000 });
-          } catch (e) {
-            // ignore
-          }
-        }
-        console.log("Navigated to reviews page (or review list visible)");
-      } else {
-        console.log(
-          "Could not locate explicit 'See All Customer Reviews' button/link; attempting to detect reviews section in place",
-        );
-      }
+      console.log(`Clicked reviews trigger: ${clicked}`);
+
+      // Force scroll to bottom to ensure lazy loading triggers
+      await page.evaluate(async () => {
+        window.scrollTo(0, document.body.scrollHeight);
+        await new Promise(r => setTimeout(r, 2000));
+        window.scrollTo(0, document.body.scrollHeight / 2); // Scroll back up slightly
+      });
+
+      await new Promise(r => setTimeout(r, 3000)); // Wait for lazy load
     } catch (e) {
-      console.log("Error clicking 'See All Customer Reviews':", (e as Error).message);
+      console.log("Error interacting with review controls:", e);
     }
 
-    // Wait a bit for reviews to load
-    await waitFor(1200);
+    // 4. Check if reviews exist; if not, try direct navigation to reviews page using SKU
+    const hasReviews = await page.$(".ugc-review, .review-item, [data-review-id]");
+    if (!hasReviews) {
+      console.log("No reviews found on product page. Attempting direct navigation to reviews page...");
+      try {
+        // Extract SKU
+        const sku = await page.evaluate(() => {
+          // Selector logic for SKU
+          const skuEl = document.querySelector(".sku .product-data-value, .disclaimer") as HTMLElement;
+          if (skuEl && skuEl.textContent) {
+            const m = skuEl.textContent.match(/SKU:\s*(\d+)/i);
+            return m ? m[1] : null;
+          }
+          return null;
+        });
+
+        if (sku) {
+          console.log(`Extracted SKU: ${sku}. Navigating to reviews page...`);
+          // Best Buy Reviews URL pattern: /site/reviews/{slug}/{sku}
+          // We can often use a dummy slug
+          const reviewsUrl = `https://www.bestbuy.com/site/reviews/product/${sku}`;
+          await page.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+          await waitFor(2000);
+        } else {
+          console.log("Could not extract SKU to build reviews URL.");
+        }
+      } catch (err) {
+        console.log("Direct navigation failed:", err);
+      }
+    }
 
     // Basic product metadata (title + image)
     const productData = await page.evaluate(() => {
@@ -497,8 +507,8 @@ export async function scrapeBestBuyProduct(productUrl: string, config: ScraperCo
 
     const result: ScrapingResult = {
       title: (productData.title as string) || "N/A",
-      rating: "N/A",
-      totalReviews: allReviews.length,
+      rating: productData.rating || "N/A",
+      totalReviews: productData.totalReviews || allReviews.length,
       image: (productData.image as string) || "N/A",
       fiveStarReviews: fiveStarReviews,
       fiveStarReviewCount: fiveStarReviews.length,

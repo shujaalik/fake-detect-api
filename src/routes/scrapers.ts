@@ -5,6 +5,8 @@ import { scrapeBestBuyProduct } from "src/components/scrapers/bestbuy";
 import { scrapeEtsyProduct } from "src/components/scrapers/etsy";
 import { scrapeFlipkartProduct } from "src/components/scrapers/flipkart";
 import { runPythonPredict } from "src/utils/pythonBridge";
+import { db } from "../services/firebase.js";
+import { collection, query, where, getDocs, addDoc } from "firebase/firestore";
 
 const DEBUG = process.env.DEBUG === "true";
 
@@ -123,6 +125,27 @@ export default async function scrapersRoutes(fastify: FastifyInstance, _options:
       return;
     }
 
+    // Check cache
+    try {
+      // Create a simple normalized ID or query by URL
+      const cachedSnapshot = await getDocs(query(collection(db, "cached_analyses"), where("url", "==", url)));
+
+      if (!cachedSnapshot.empty) {
+        const docSnap = cachedSnapshot.docs[0];
+        const data = docSnap.data();
+        const timestamp = data.timestamp; // milliseconds
+        const tenDays = 10 * 24 * 60 * 60 * 1000;
+
+        if (Date.now() - timestamp < tenDays) {
+          reply.send({ analysisId: docSnap.id, url: data.url, ...data.report });
+          return;
+        }
+      }
+    } catch (e) {
+      console.error("Cache check failed", e);
+      // Proceed to scrape if cache fails
+    }
+
     // try {
     let scrapingResult;
     const config = { headless: !DEBUG, maxReviews: 100 };
@@ -187,12 +210,52 @@ export default async function scrapersRoutes(fastify: FastifyInstance, _options:
       },
     };
 
-    return report;
+    // Save to Cache
+    let analysisId = "";
+    try {
+      const docRef = await addDoc(collection(db, "cached_analyses"), {
+        url: url,
+        report: report,
+        timestamp: Date.now(),
+      });
+      analysisId = docRef.id;
+    } catch (e) {
+      console.error("Failed to save to cache", e);
+    }
+
+    return { analysisId, url, ...report };
 
     // } catch (error) {
     //   console.error("Analysis failed:", error);
     //   reply.status(500).send({ error: "Analysis failed", details: error });
     //   return;
     // }
+  });
+
+  fastify.get("/analysis/:id", async function handler(request, reply) {
+    const { id } = request.params as { id: string };
+    if (!id) {
+      reply.status(400).send({ error: "Missing id" });
+      return;
+    }
+    try {
+      // Dynamic import to avoid earlier failures if firebase/firestore not ready?
+      // No, imports are top level. Assuming db is ready.
+      const { doc, getDoc } = await import("firebase/firestore");
+      const { db } = await import("../services/firebase.js");
+
+      const docRef = doc(db, "cached_analyses", id);
+      const docSnap = await getDoc(docRef);
+
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        reply.send({ ...data.report, url: data.url });
+      } else {
+        reply.status(404).send({ error: "Analysis not found" });
+      }
+    } catch (e) {
+      console.error("Failed to fetch analysis", e);
+      reply.status(500).send({ error: "Failed to fetch analysis" });
+    }
   });
 }
