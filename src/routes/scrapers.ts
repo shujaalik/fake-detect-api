@@ -258,4 +258,37 @@ export default async function scrapersRoutes(fastify: FastifyInstance, _options:
       reply.status(500).send({ error: "Failed to fetch analysis" });
     }
   });
+
+  fastify.post("/predict", async function handler(request, reply) {
+    const { text } = request.body as { text: string };
+    if (!text) {
+      reply.status(400).send({ error: "Missing text body parameter" });
+      return;
+    }
+
+    try {
+      const results = await runPythonPredict([text]);
+      if (results && results.length > 0) {
+        const result = results[0];
+        // Python returns probability as a list [prob_classA, prob_classB].
+        // We want the scalar confidence score (max probability) for the UI.
+        let confidence = 0;
+        if (Array.isArray(result.probability)) {
+          confidence = Math.max(...result.probability);
+        } else {
+          confidence = result.probability;
+        }
+
+        return {
+          review: result.review,
+          prediction: result.prediction,
+          probability: confidence,
+        };
+      } else {
+        reply.status(500).send({ error: "No prediction returned" });
+      }
+    } catch (error) {
+      reply.status(500).send({ error: "Prediction failed", details: error });
+    }
+  });
 }
