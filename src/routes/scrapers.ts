@@ -6,13 +6,23 @@ import { scrapeEtsyProduct } from "src/components/scrapers/etsy";
 import { scrapeFlipkartProduct } from "src/components/scrapers/flipkart";
 import { scrapePakWheelsProduct } from "src/components/scrapers/pakwheels";
 import { scrapeAlibabaProduct } from "src/components/scrapers/alibaba";
+import { scrapeAmazonProduct } from "src/components/scrapers/amazon";
 import { runPythonPredict } from "src/utils/pythonBridge";
 import { db } from "../services/firebase.js";
 import { collection, query, where, getDocs, addDoc } from "firebase/firestore";
 
 const DEBUG = process.env.DEBUG === "true";
 
-type ScraperType = "aliexpress" | "daraz" | "bestbuy" | "etsy" | "flipkart" | "pakwheels" | "alibaba" | "unknown";
+type ScraperType =
+  | "aliexpress"
+  | "daraz"
+  | "bestbuy"
+  | "etsy"
+  | "flipkart"
+  | "pakwheels"
+  | "alibaba"
+  | "amazon"
+  | "unknown";
 
 interface Review {
   text: string;
@@ -36,6 +46,7 @@ function detectPlatform(url: string): ScraperType {
   if (lowerUrl.includes("flipkart")) return "flipkart";
   if (lowerUrl.includes("pakwheels")) return "pakwheels";
   if (lowerUrl.includes("alibaba.com") || lowerUrl.includes("alibaba.us")) return "alibaba";
+  if (lowerUrl.includes("amazon.") || lowerUrl.includes("amzn.")) return "amazon";
   return "unknown";
 }
 
@@ -159,6 +170,19 @@ export default async function scrapersRoutes(fastify: FastifyInstance, _options:
     }
   });
 
+  fastify.get("/amazon", async (req: any, reply) => {
+    const { url } = req.query;
+    if (!url) return reply.status(400).send({ error: "Missing url parameter" });
+    try {
+      const result = await scrapeAmazonProduct(url);
+      reply.send(result);
+    } catch (error) {
+      // Extract error message if possible
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      reply.status(500).send({ error: "Failed to scrape Amazon", details: msg });
+    }
+  });
+
   fastify.get("/analyze", async function handler(request, reply) {
     const url = (request.query as { url?: string }).url;
     if (!url) {
@@ -168,11 +192,10 @@ export default async function scrapersRoutes(fastify: FastifyInstance, _options:
 
     const platform = detectPlatform(url);
     if (platform === "unknown") {
-      reply
-        .status(400)
-        .send({
-          error: "Unsupported platform. Supported: AliExpress, Daraz, BestBuy, Etsy, Flipkart, PakWheels, Alibaba",
-        });
+      reply.status(400).send({
+        error:
+          "Unsupported platform. Supported: AliExpress, Daraz, BestBuy, Etsy, Flipkart, PakWheels, Alibaba, Amazon",
+      });
       return;
     }
 
@@ -222,6 +245,9 @@ export default async function scrapersRoutes(fastify: FastifyInstance, _options:
         break;
       case "alibaba":
         scrapingResult = await scrapeAlibabaProduct(url, config);
+        break;
+      case "amazon":
+        scrapingResult = await scrapeAmazonProduct(url);
         break;
     }
 
