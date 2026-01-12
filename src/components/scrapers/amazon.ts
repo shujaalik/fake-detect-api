@@ -85,7 +85,7 @@ export async function scrapeAmazonProduct(url: string): Promise<ScrapingResult> 
 
   const title = productItem?.productTitle || rawProduct.title || "Amazon Product";
   const image =
-    productItem?.productImageUrl ||
+    rawProduct?.highResolutionImages?.[0] ||
     rawProduct.mainImage ||
     rawProduct.image ||
     (rawProduct.images && rawProduct.images[0]) ||
