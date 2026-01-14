@@ -29,7 +29,8 @@ if __name__ == "__main__":
 
     # Parse the JSON list of reviews
     try:
-        reviews = json.loads(sys.argv[1])
+        sys.argv[1] = sys.argv[1][2:-2]
+        reviews = sys.argv[1].split(",")
         if not isinstance(reviews, list):
             raise ValueError
     except:
